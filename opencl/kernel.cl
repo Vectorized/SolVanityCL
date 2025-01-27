@@ -4790,191 +4790,91 @@ constant uint64_t K[80] = {
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 #endif
 
-/* compress 1024-bits */
-static int sha512_compress(sha512_context *md, unsigned char *buf) {
+int sha512(const unsigned char *message, unsigned char *out) {
+  sha512_context md;
+  md.state[0] = UINT64_C(0x6a09e667f3bcc908);
+  md.state[1] = UINT64_C(0xbb67ae8584caa73b);
+  md.state[2] = UINT64_C(0x3c6ef372fe94f82b);
+  md.state[3] = UINT64_C(0xa54ff53a5f1d36f1);
+  md.state[4] = UINT64_C(0x510e527fade682d1);
+  md.state[5] = UINT64_C(0x9b05688c2b3e6c1f);
+  md.state[6] = UINT64_C(0x1f83d9abfb41bd6b);
+  md.state[7] = UINT64_C(0x5be0cd19137e2179);
+
+  // sha512_update inlined
+  // 
+  // All `if` statements from this function are eliminated if we
+  // will only ever hash a 32 byte seed input. So inlining this
+  // has a drastic speed improvement on GPUs.
+  //
+  // This means:
+  //   * Normally we iterate for each 128 bytes of input, but we are always < 128. So no iteration.
+  //   * We can eliminate a MIN(inlen, (128 - md.curlen)) comparison, specialize to 32, branch prediction improvement.
+  //   * We can eliminate the in/inlen tracking as we will never subtract while under 128
+  //   * As a result, the only thing update does is copy the bytes into the buffer.
+  for (int i = 0; i < 32; ++i) md.buf[i] = message[i];
+
+  // sha512_final inlined
+  // 
+  // As update was effectively elimiated, the only time we do
+  // sha512_compress now is in the finalize function. We can also
+  // optimize this:
+  //
+  // This means:
+  //   * We don't need to care about the curlen > 112 check. Eliminating a branch.
+  //   * We only need to run one round of sha512_compress, so we can inline it entirely as we don't need to unroll.
+  md.length = 32 * UINT64_C(8);
+  md.buf[32] = (uchar) 0x80;
+
+  #pragma unroll
+  for (int i = 33; i < 120; i++) md.buf[i] = (uchar) 0;
+  md.curlen = 120;
+
+  STORE64H(md.length, md.buf + 120);
+
+  // Inline sha512_compress
   uint64_t S[8], W[80], t0, t1;
-  int i;
 
-  /* copy state into S */
-  for (i = 0; i < 8; i++) {
-    S[i] = md->state[i];
-  }
+  /* Copy state into S */
+  #pragma unroll
+  for (int i = 0; i < 8; i++) S[i] = md.state[i];
 
-  /* copy the state into 1024-bits into W[0..15] */
-  for (i = 0; i < 16; i++) {
-    LOAD64H(W[i], buf + (8 * i));
-  }
+  /* Copy the state into 1024-bits into W[0..15] */
+  #pragma unroll
+  for (int i = 0; i < 16; i++) LOAD64H(W[i], md.buf + (8*i));
 
-  /* fill W[16..79] */
-  for (i = 16; i < 80; i++) {
-    W[i] = Gamma1(W[i - 2]) + W[i - 7] + Gamma0(W[i - 15]) + W[i - 16];
-  }
+  /* Fill W[16..79] */
+  #pragma unroll
+  for (int i = 16; i < 80; i++) W[i] = Gamma1(W[i - 2]) + W[i - 7] + Gamma0(W[i - 15]) + W[i - 16];
 
   /* Compress */
-#define RND(a, b, c, d, e, f, g, h, i)                                         \
-  t0 = h + Sigma1(e) + Ch(e, f, g) + K[i] + W[i];                              \
-  t1 = Sigma0(a) + Maj(a, b, c);                                               \
-  d += t0;                                                                     \
-  h = t0 + t1;
+  #define RND(a,b,c,d,e,f,g,h,i) \
+  t0 = h + Sigma1(e) + Ch(e, f, g) + K[i] + W[i]; \
+  t1 = Sigma0(a) + Maj(a, b, c);\
+  d += t0; \
+  h  = t0 + t1;
 
-  for (i = 0; i < 80; i += 8) {
-    RND(S[0], S[1], S[2], S[3], S[4], S[5], S[6], S[7], i + 0);
-    RND(S[7], S[0], S[1], S[2], S[3], S[4], S[5], S[6], i + 1);
-    RND(S[6], S[7], S[0], S[1], S[2], S[3], S[4], S[5], i + 2);
-    RND(S[5], S[6], S[7], S[0], S[1], S[2], S[3], S[4], i + 3);
-    RND(S[4], S[5], S[6], S[7], S[0], S[1], S[2], S[3], i + 4);
-    RND(S[3], S[4], S[5], S[6], S[7], S[0], S[1], S[2], i + 5);
-    RND(S[2], S[3], S[4], S[5], S[6], S[7], S[0], S[1], i + 6);
-    RND(S[1], S[2], S[3], S[4], S[5], S[6], S[7], S[0], i + 7);
+  #pragma unroll
+  for (int i = 0; i < 80; i += 8) {
+      RND(S[0],S[1],S[2],S[3],S[4],S[5],S[6],S[7],i+0);
+      RND(S[7],S[0],S[1],S[2],S[3],S[4],S[5],S[6],i+1);
+      RND(S[6],S[7],S[0],S[1],S[2],S[3],S[4],S[5],i+2);
+      RND(S[5],S[6],S[7],S[0],S[1],S[2],S[3],S[4],i+3);
+      RND(S[4],S[5],S[6],S[7],S[0],S[1],S[2],S[3],i+4);
+      RND(S[3],S[4],S[5],S[6],S[7],S[0],S[1],S[2],i+5);
+      RND(S[2],S[3],S[4],S[5],S[6],S[7],S[0],S[1],i+6);
+      RND(S[1],S[2],S[3],S[4],S[5],S[6],S[7],S[0],i+7);
   }
 
-#undef RND
+  #undef RND
 
-  /* feedback */
-  for (i = 0; i < 8; i++) {
-    md->state[i] = md->state[i] + S[i];
-  }
+  /* Feedback */
+  #pragma unroll
+  for (int i = 0; i < 8; i++) md.state[i] = md.state[i] + S[i];
 
-  return 0;
-}
-
-/**
-   Initialize the hash state
-   @param md   The hash state you wish to initialize
-   @return 0 if successful
-*/
-int sha512_init(sha512_context *md) {
-  if (md == NULL)
-    return 1;
-
-  md->curlen = 0;
-  md->length = 0;
-  md->state[0] = UINT64_C(0x6a09e667f3bcc908);
-  md->state[1] = UINT64_C(0xbb67ae8584caa73b);
-  md->state[2] = UINT64_C(0x3c6ef372fe94f82b);
-  md->state[3] = UINT64_C(0xa54ff53a5f1d36f1);
-  md->state[4] = UINT64_C(0x510e527fade682d1);
-  md->state[5] = UINT64_C(0x9b05688c2b3e6c1f);
-  md->state[6] = UINT64_C(0x1f83d9abfb41bd6b);
-  md->state[7] = UINT64_C(0x5be0cd19137e2179);
-
-  return 0;
-}
-
-/**
-   Process a block of memory though the hash
-   @param md     The hash state
-   @param in     The data to hash
-   @param inlen  The length of the data (octets)
-   @return 0 if successful
-*/
-int sha512_update(sha512_context *md, const unsigned char *in, size_t inlen) {
-  size_t n;
-  size_t i;
-  int err;
-  if (md == NULL)
-    return 1;
-  if (in == NULL)
-    return 1;
-  if (md->curlen > sizeof(md->buf)) {
-    return 1;
-  }
-  while (inlen > 0) {
-    if (md->curlen == 0 && inlen >= 128) {
-      if ((err = sha512_compress(md, (unsigned char *)in)) != 0) {
-        return err;
-      }
-      md->length += 128 * 8;
-      in += 128;
-      inlen -= 128;
-    } else {
-      n = MIN(inlen, (128 - md->curlen));
-
-      for (i = 0; i < n; i++) {
-        md->buf[i + md->curlen] = in[i];
-      }
-
-      md->curlen += n;
-      in += n;
-      inlen -= n;
-      if (md->curlen == 128) {
-        if ((err = sha512_compress(md, md->buf)) != 0) {
-          return err;
-        }
-        md->length += 8 * 128;
-        md->curlen = 0;
-      }
-    }
-  }
-  return 0;
-}
-
-/**
-   Terminate the hash to get the digest
-   @param md  The hash state
-   @param out [out] The destination of the hash (64 bytes)
-   @return 0 if successful
-*/
-int sha512_final(sha512_context *md, unsigned char *out) {
-  int i;
-
-  if (md == NULL)
-    return 1;
-  if (out == NULL)
-    return 1;
-
-  if (md->curlen >= sizeof(md->buf)) {
-    return 1;
-  }
-
-  /* increase the length of the message */
-  md->length += md->curlen * UINT64_C(8);
-
-  /* append the '1' bit */
-  md->buf[md->curlen++] = (unsigned char)0x80;
-
-  /* if the length is currently above 112 bytes we append zeros
-   * then compress.  Then we can fall back to padding zeros and length
-   * encoding like normal.
-   */
-  if (md->curlen > 112) {
-    while (md->curlen < 128) {
-      md->buf[md->curlen++] = (unsigned char)0;
-    }
-    sha512_compress(md, md->buf);
-    md->curlen = 0;
-  }
-
-  /* pad upto 120 bytes of zeroes
-   * note: that from 112 to 120 is the 64 MSB of the length.  We assume that you
-   * won't hash > 2^64 bits of data... :-)
-   */
-  while (md->curlen < 120) {
-    md->buf[md->curlen++] = (unsigned char)0;
-  }
-
-  /* store length */
-  STORE64H(md->length, md->buf + 120);
-  sha512_compress(md, md->buf);
-
-  /* copy output */
-  for (i = 0; i < 8; i++) {
-    STORE64H(md->state[i], out + (8 * i));
-  }
-
-  return 0;
-}
-
-int sha512(const unsigned char *message, size_t message_len,
-           unsigned char *out) {
-  sha512_context ctx;
-  int ret;
-  if ((ret = sha512_init(&ctx)))
-    return ret;
-  if ((ret = sha512_update(&ctx, message, message_len)))
-    return ret;
-  if ((ret = sha512_final(&ctx, out)))
-    return ret;
+  // We can now output our finalized bytes into the output buffer.
+  #pragma unroll
+  for (int i = 0; i < 8; i++) STORE64H(md.state[i], out+(8*i));
   return 0;
 }
 
@@ -4983,7 +4883,7 @@ void ed25519_create_keypair(unsigned char *public_key,
                             const unsigned char *seed) {
   ge_p3 A;
 
-  sha512(seed, 32, private_key);
+  sha512(seed, private_key);
   private_key[0] &= 248;
   private_key[31] &= 63;
   private_key[31] |= 64;
@@ -4995,97 +4895,167 @@ void ed25519_create_keypair(unsigned char *public_key,
 constant uchar alphabet[] =
     "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
-static uchar *base58_encode(uchar *in, size_t *out_len) {
-  size_t in_len = 32, out_length;
-  uchar addr[44];
-  uchar *out = &addr[0];
-  *out_len = out_length;
-
-  // leading zeroes
-  size_t total = 0;
-  for (size_t i = 0; i < in_len && !in[i]; ++i) {
-    out[total++] = alphabet[0];
+static void base58_encode(uchar *in, size_t *out_len, uchar *out) {
+  unsigned int binary[8];
+  uint64_t intermediate[9];
+  
+  #define REV_ENDIAN(a, i) ( \
+  (((unsigned int) a[i * 4 + 0]) << 24) | \
+  (((unsigned int) a[i * 4 + 1]) << 16) | \
+  (((unsigned int) a[i * 4 + 2]) << 8) | \
+  (((unsigned int) a[i * 4 + 3])) )
+  
+  #define INIT_BINARY(i) binary[i] = REV_ENDIAN(in, i);
+  
+  INIT_BINARY(0)
+  INIT_BINARY(1)
+  INIT_BINARY(2)
+  INIT_BINARY(3)
+  INIT_BINARY(4)
+  INIT_BINARY(5)
+  INIT_BINARY(6)
+  INIT_BINARY(7)
+  
+  unsigned int in_leading_0s = (clz(binary[0]) + (binary[0] == 0) * clz(binary[1])) >> 3;
+  if (in_leading_0s == 8) {
+    for (; in_leading_0s < 32; in_leading_0s++) if (in[in_leading_0s]) break;   
   }
-  in += total;
-  in_len -= total;
-  out += total;
-  size_t zero_length = total;
-
-  // encoding
-  size_t idx = 0;
-  for (size_t i = 0; i < in_len; ++i) {
-    unsigned int carry = in[i];
-    for (size_t j = 0; j < idx; ++j) {
-      carry += (unsigned int)out[j] << 8;
-      out[j] = (carry % 58);
-      carry /= 58;
-    }
-    while (carry > 0) {
-      total++;
-      out[idx++] = (carry % 58);
-      carry /= 58;
-    }
+  
+  intermediate[0] = 0;
+  intermediate[1] = 0;
+  intermediate[2] = 0;
+  intermediate[3] = 0;
+  intermediate[4] = 0;
+  intermediate[5] = 0;
+  intermediate[6] = 0;
+  intermediate[7] = 0;
+  intermediate[8] = 0;
+  
+  intermediate[1] += (uint64_t) binary[0] * (uint64_t) 513735UL;
+  intermediate[2] += (uint64_t) binary[0] * (uint64_t) 77223048UL;
+  intermediate[3] += (uint64_t) binary[0] * (uint64_t) 437087610UL;
+  intermediate[4] += (uint64_t) binary[0] * (uint64_t) 300156666UL;
+  intermediate[5] += (uint64_t) binary[0] * (uint64_t) 605448490UL;
+  intermediate[6] += (uint64_t) binary[0] * (uint64_t) 214625350UL;
+  intermediate[7] += (uint64_t) binary[0] * (uint64_t) 141436834UL;
+  intermediate[8] += (uint64_t) binary[0] * (uint64_t) 379377856UL;
+  intermediate[2] += (uint64_t) binary[1] * (uint64_t) 78508UL;
+  intermediate[3] += (uint64_t) binary[1] * (uint64_t) 646269101UL;
+  intermediate[4] += (uint64_t) binary[1] * (uint64_t) 118408823UL;
+  intermediate[5] += (uint64_t) binary[1] * (uint64_t) 91512303UL;
+  intermediate[6] += (uint64_t) binary[1] * (uint64_t) 209184527UL;
+  intermediate[7] += (uint64_t) binary[1] * (uint64_t) 413102373UL;
+  intermediate[8] += (uint64_t) binary[1] * (uint64_t) 153715680UL;
+  intermediate[3] += (uint64_t) binary[2] * (uint64_t) 11997UL;
+  intermediate[4] += (uint64_t) binary[2] * (uint64_t) 486083817UL;
+  intermediate[5] += (uint64_t) binary[2] * (uint64_t) 3737691UL;
+  intermediate[6] += (uint64_t) binary[2] * (uint64_t) 294005210UL;
+  intermediate[7] += (uint64_t) binary[2] * (uint64_t) 247894721UL;
+  intermediate[8] += (uint64_t) binary[2] * (uint64_t) 289024608UL;
+  intermediate[4] += (uint64_t) binary[3] * (uint64_t) 1833UL;
+  intermediate[5] += (uint64_t) binary[3] * (uint64_t) 324463681UL;
+  intermediate[6] += (uint64_t) binary[3] * (uint64_t) 385795061UL;
+  intermediate[7] += (uint64_t) binary[3] * (uint64_t) 551597588UL;
+  intermediate[8] += (uint64_t) binary[3] * (uint64_t) 21339008UL;
+  intermediate[5] += (uint64_t) binary[4] * (uint64_t) 280UL;
+  intermediate[6] += (uint64_t) binary[4] * (uint64_t) 127692781UL;
+  intermediate[7] += (uint64_t) binary[4] * (uint64_t) 389432875UL;
+  intermediate[8] += (uint64_t) binary[4] * (uint64_t) 357132832UL;
+  intermediate[6] += (uint64_t) binary[5] * (uint64_t) 42UL;
+  intermediate[7] += (uint64_t) binary[5] * (uint64_t) 537767569UL;
+  intermediate[8] += (uint64_t) binary[5] * (uint64_t) 410450016UL;
+  intermediate[7] += (uint64_t) binary[6] * (uint64_t) 6UL;
+  intermediate[8] += (uint64_t) binary[6] * (uint64_t) 356826688UL;
+  intermediate[8] += (uint64_t) binary[7] * (uint64_t) 1UL;
+  
+  intermediate[7] += intermediate[8] / 656356768UL;
+  intermediate[8] %= 656356768UL;
+  intermediate[6] += intermediate[7] / 656356768UL;
+  intermediate[7] %= 656356768UL;
+  intermediate[5] += intermediate[6] / 656356768UL;
+  intermediate[6] %= 656356768UL;
+  intermediate[4] += intermediate[5] / 656356768UL;
+  intermediate[5] %= 656356768UL;
+  intermediate[3] += intermediate[4] / 656356768UL;
+  intermediate[4] %= 656356768UL;
+  intermediate[2] += intermediate[3] / 656356768UL;
+  intermediate[3] %= 656356768UL;
+  intermediate[1] += intermediate[2] / 656356768UL;
+  intermediate[2] %= 656356768UL;
+  intermediate[0] += intermediate[1] / 656356768UL;
+  intermediate[1] %= 656356768UL;
+  
+  #define DO_FINAL(i) \
+  out[5 * i + 4] = ((((unsigned int) intermediate[i]) / 1U       ) % 58U); \
+  out[5 * i + 3] = ((((unsigned int) intermediate[i]) / 58U      ) % 58U); \
+  out[5 * i + 2] = ((((unsigned int) intermediate[i]) / 3364U    ) % 58U); \
+  out[5 * i + 1] = ((((unsigned int) intermediate[i]) / 195112U  ) % 58U); \
+  out[5 * i + 0] = ( ((unsigned int) intermediate[i]) / 11316496U);
+  
+  DO_FINAL(0)
+  DO_FINAL(1)
+  DO_FINAL(2)
+  DO_FINAL(3)
+  DO_FINAL(4)
+  DO_FINAL(5)
+  DO_FINAL(6)
+  DO_FINAL(7)
+  DO_FINAL(8)
+  
+  unsigned int t = REV_ENDIAN(out, 0);
+  unsigned int raw_leading_0s = (clz(t) + (t == 0) * clz(REV_ENDIAN(out, 1))) >> 3;
+  if (raw_leading_0s == 8) {
+    for (; raw_leading_0s < 45; raw_leading_0s++) if (out[raw_leading_0s]) break;
   }
-
-  // apply alphabet and reverse
-  size_t c_idx = idx >> 1;
-  for (size_t i = 0; i < c_idx; ++i) {
-    uchar s = alphabet[(uchar)out[i]];
-    out[i] = alphabet[(uchar)out[idx - (i + 1)]];
-    out[idx - (i + 1)] = s;
-  }
-  if ((idx & 1)) {
-    out[c_idx] = alphabet[(uchar)out[c_idx]];
-  }
-  *out_len = total;
-  if (zero_length) {
-    out -= zero_length;
-  }
-  return out;
+  
+  unsigned int skip = (raw_leading_0s - in_leading_0s) * (raw_leading_0s > in_leading_0s);
+  #pragma unroll
+  for (int i = 0; i < 45; i++) out[i] = alphabet[out[(skip + i) * ((skip + i) < 45)]];
+  *out_len = (9 * 5) - skip;
 }
 
-__kernel void generate_pubkey(constant uchar *seed, global uchar *out,
-                              global uchar *occupied_bytes,
-                              global uchar *group_offset) {
+__kernel void generate_pubkey(constant uchar *seed, global uchar *out, global uchar *group_offset) {
   uchar public_key[32], private_key[64];
   uchar key_base[32];
+  #pragma unroll
   for (size_t i = 0; i < 32; i++) {
     key_base[i] = seed[i];
   }
-  const global_id = (*group_offset) * get_global_size(0) + get_global_id(0);
+  const int global_id = (*group_offset) * get_global_size(0) + get_global_id(0);
 
   // reset last occupied bytes
-  for (size_t i = 0; i < *occupied_bytes; i++) {
+  #pragma unroll
+  for (size_t i = 0; i < OCCUPIED_BYTES; i++) {
     key_base[31 - i] += ((global_id >> (i * 8)) & 0xFF);
   }
 
   ed25519_create_keypair(public_key, private_key, key_base);
   size_t length;
-  uchar *addr = base58_encode(public_key, &length);
+  uchar addr[45];
+  base58_encode(public_key, &length, addr);
 
-  // pattern match
-  size_t prefix_len = sizeof(PREFIX), suffix_len = sizeof(SUFFIX);
-  for (size_t i = 0; i < suffix_len; i++) {
-    if (addr[length - suffix_len + i] != SUFFIX[i])
-      return;
+  int any_mismatch = 0;
+  #pragma unroll
+  for (size_t i = 0; i < sizeof(SUFFIX); i++) {
+    any_mismatch |= addr[length - sizeof(SUFFIX) + i] != SUFFIX[i];
   }
-
-  for (size_t i = 0; i < prefix_len; i++) {
-    if (addr[i] != PREFIX[i])
-      return;
+  #pragma unroll
+  for (size_t i = 0; i < sizeof(PREFIX); i++) {
+    any_mismatch |= addr[i] != PREFIX[i];
   }
-
-  // assign to out
-  if (out[0] == 0) {
-    out[0] = length;
-    for (size_t j = 0; j < 32; j++) {
-      out[j + 1] = key_base[j];
+  if (!any_mismatch) {
+    // assign to out
+    if (out[0] == 0) {
+      out[0] = length;
+      for (size_t j = 0; j < 32; j++) {
+        out[j + 1] = key_base[j];
+      }
     }
-  }
-  if (length < out[0]) {
-    out[0] = length;
-    for (size_t j = 0; j < 32; j++) {
-      out[j + 1] = key_base[j];
-    }
+    if (length < out[0]) {
+      out[0] = length;
+      for (size_t j = 0; j < 32; j++) {
+        out[j + 1] = key_base[j];
+      }
+    }  
   }
 }
