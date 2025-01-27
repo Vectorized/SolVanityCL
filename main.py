@@ -5,7 +5,7 @@ import platform
 import secrets
 import sys
 import time
-from itertools import product
+from concurrent.futures import ThreadPoolExecutor
 from math import ceil
 from multiprocessing.pool import Pool
 
@@ -65,7 +65,7 @@ def check_character(name: str, character: str):
         raise e
 
 
-def get_kernel_source(starts_with: str, ends_with: str, iteration_bits:int, cl):
+def get_kernel_source(starts_with: str, ends_with: str, cl):
     PREFIX_BYTES = list(bytes(starts_with.encode()))
     SUFFIX_BYTES = list(bytes(ends_with.encode()))
 
@@ -82,10 +82,10 @@ def get_kernel_source(starts_with: str, ends_with: str, iteration_bits:int, cl):
                 f"constant uchar SUFFIX[] = {{{', '.join(map(str, SUFFIX_BYTES))}}};\n"
             )
 
-    source_str = (
-        '\n'.join(['#define OCCUPIED_BYTES ' + str(np.ubyte(ceil(iteration_bits / 8)))]) + 
-        '\n' + ''.join(source_lines)
-    )
+    source_str = "".join(source_lines)
+
+    if "NVIDIA" in str(cl.get_platforms()) and platform.system() == "Windows":
+        source_str = source_str.replace("#define __generic\n", "")
 
     if cl.get_cl_header_version()[0] != 1 and platform.system() != "Windows":
         source_str = source_str.replace("#define __generic\n", "")
@@ -100,6 +100,16 @@ def get_all_gpu_devices():
         for device in platform.get_devices(device_type=cl.device_type.GPU)
     ]
     return [d.int_ptr for d in devices]
+
+
+def single_gpu_init(context, setting):
+    searcher = Searcher(
+        kernel_source=setting.kernel_source,
+        index=0,
+        setting=setting,
+        context=context,
+    )
+    return [searcher.find()]
 
 
 def multi_gpu_init(index: int, setting: HostSetting):
@@ -140,7 +150,6 @@ class Searcher:
     def __init__(
         self, *, kernel_source, index: int, setting: HostSetting, context=None
     ):
-
         device_ids = get_all_gpu_devices()
         # context and command queue
         if context:
@@ -179,6 +188,12 @@ class Searcher:
         memobj_output = cl.Buffer(
             self.context, cl.mem_flags.READ_WRITE, 33 * np.ubyte().itemsize
         )
+
+        memobj_occupied_bytes = cl.Buffer(
+            self.context,
+            cl.mem_flags.READ_WRITE | cl.mem_flags.COPY_HOST_PTR,
+            hostbuf=np.array([self.setting.iteration_bytes]),
+        )
         memobj_group_offset = cl.Buffer(
             self.context,
             cl.mem_flags.READ_WRITE | cl.mem_flags.COPY_HOST_PTR,
@@ -187,7 +202,8 @@ class Searcher:
         output = np.zeros(33, dtype=np.ubyte)
         self.kernel.set_arg(0, memobj_key32)
         self.kernel.set_arg(1, memobj_output)
-        self.kernel.set_arg(2, memobj_group_offset)
+        self.kernel.set_arg(2, memobj_occupied_bytes)
+        self.kernel.set_arg(3, memobj_group_offset)
 
         st = time.time()
         global_worker_size = self.setting.global_work_size // self.gpu_chunks
@@ -273,23 +289,20 @@ def search_pubkey(
     with Pool() as pool:
         gpu_counts = len(pool.apply(get_all_gpu_devices))
 
-    kernel_source = get_kernel_source(starts_with, ends_with, iteration_bits, cl)
+    kernel_source = get_kernel_source(starts_with, ends_with, cl)
     setting = HostSetting(kernel_source, iteration_bits)
     result_count = 0
 
     logging.info(f"Searching with {gpu_counts} OpenCL devices")
     if select_device:
-        context = cl.create_some_context()
-        searcher = Searcher(
-            kernel_source=setting.kernel_source,
-            index=0,
-            setting=setting,
-            context=context,
-        )
-        while result_count < count:
-            output = searcher.find()
-            setting.increase_key32()
-            result_count += save_result([output], output_dir)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            context = cl.create_some_context()
+            while result_count < count:
+                future = executor.submit(single_gpu_init, context, setting)
+                result = future.result()
+                result_count += save_result(result, output_dir)
+                setting.increase_key32()
+                time.sleep(0.1)
         return
 
     with Pool(processes=gpu_counts) as pool:
@@ -308,10 +321,10 @@ def show_device():
 
     platforms = cl.get_platforms()
 
-    for p_index, platform in enumerate(platforms):
-        print(f"Platform {p_index}: {platform.name}")
+    for p_index, platform_ in enumerate(platforms):
+        print(f"Platform {p_index}: {platform_.name}")
 
-        devices = platform.get_devices()
+        devices = platform_.get_devices()
 
         for d_index, device in enumerate(devices):
             print(f"- Device {d_index}: {device.name}")
